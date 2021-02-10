@@ -10,6 +10,12 @@ You can add the plugin into your ansible project where all the playbooks are or 
 callback_plugins = ~/.ansible/plugins/callback_plugins/:/usr/share/ansible_plugins/callback_plugins
 
 ```
+then activate it by setting:
+
+```
+callback_whitelist = elasticsearch
+
+```
 
 For more information about ansible configuration please refer to:
 
