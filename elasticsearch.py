@@ -226,4 +226,5 @@ class CallbackModule(CallbackBase):
         self._insert()
 
     def v2_on_file_diff(self, result):
-        self.diff = re.sub(r'(\[.*?;.*?m|\[0m)', '', self._get_diff(result._result['diff']))
+        self.diff = re.sub(r"(\x9B|\x1B\[)[0-?]*[ -/]*[@-~]", '', self._get_diff(result._result['diff']))
+
