@@ -17,7 +17,7 @@ callback_whitelist = elasticsearch
 
 ```
 
-You can customize the Settings by using the following environment variables:
+You can customize the settings by using the following environment variables:
 
 ```
 ELASTICSEARCH_SERVER   (optional): defaults to localhost
