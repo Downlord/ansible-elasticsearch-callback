@@ -1,9 +1,10 @@
-﻿#!/usr/bin/python
+#!/usr/bin/python
 # -*- coding: utf-8 -*-
 #
 #The MIT License (MIT)
 #
 #Copyright (c) 2015 Engin Yöyen
+#              2021 Helge Laurisch Helge@Laurisch.net
 #
 #Permission is hereby granted, free of charge, to any person obtaining a copy
 #of this software and associated documentation files (the "Software"), to deal
@@ -32,14 +33,22 @@ import logging
 import pytz
 import time
 import json
-
+import re
 
 from datetime import datetime
 from ansible import constants as C
 from ansible.plugins.callback import CallbackBase
 
 
-
+# these are used to provide backwards compat with old plugins that subclass from default
+# but still don't use the new config system and/or fail to document the options
+# TODO: Change the default of check_mode_markers to True in a future release (2.13)
+COMPAT_OPTIONS = (('display_skipped_hosts', C.DISPLAY_SKIPPED_HOSTS),
+                  ('display_ok_hosts', True),
+                  ('show_custom_stats', C.SHOW_CUSTOM_STATS),
+                  ('display_failed_stderr', False),
+                  ('check_mode_markers', False),)
+                  
 class CallbackModule(CallbackBase):
     """
     This is a Ansible(v2) elasticsearch callback plugin.
@@ -59,7 +68,10 @@ class CallbackModule(CallbackBase):
     CALLBACK_NEEDS_WHITELIST = False
 
     def __init__(self):
-
+        
+        self._last_task_banner = None
+        self._task_type_cache = {}
+        self._last_task_name = None
         super(CallbackModule, self).__init__()
 
         try:
@@ -87,7 +99,9 @@ class CallbackModule(CallbackBase):
         self.run_output = []
         self.taskname = ""
         self.playname = ""  
-
+        self.diff = ""
+        self.stats = ""
+        self.checkmsg = ""
 
         self.logger =  logging.getLogger('ansible logger')
         self.logger.setLevel(logging.ERROR)
@@ -97,12 +111,12 @@ class CallbackModule(CallbackBase):
         if self.db_import:
             try:
                 self.es = self.elasticsearch.Elasticsearch(self.es_address, timeout=self.timeout)
-            except Exception, e:
+            except Exception as e:
                 logging.error("Failed to connect elasticsearch server '%s'. Exception = %s " % (self.es_address, e))
                 return False
             try:
                 return self.es.ping()
-            except Exception, e:
+            except Exception as e:
                 logging.error("Failed to get ping from elasticsearch server '%s'. Exception = %s " % (self.es_address, e))
                 return False
 
@@ -110,15 +124,46 @@ class CallbackModule(CallbackBase):
         return datetime.utcnow().replace(tzinfo=pytz.utc)
 
     def _insert(self):
+        #print("sending data to ELK")
         if self.es_status:
             try:
                 result = self.helpers.helpers.bulk(self.es, self.run_output,index=self.index_name)
                 if result:
                     return True
-            except Exception, e:
+            except Exception as e:
                 logging.error("Inserting data into elasticsearch 'failed' because %s" % e)
+                print("Inserting data into elasticsearch 'failed' because %s" % e)
         return False
 
+    def _print_task_banner(self, task):
+        # args can be specified as no_log in several places: in the task or in
+        # the argument spec.  We can check whether the task is no_log but the
+        # argument spec can't be because that is only run on the target
+        # machine and we haven't run it thereyet at this time.
+        #
+        # So we give people a config option to affect display of the args so
+        # that they can secure this if they feel that their stdout is insecure
+        # (shoulder surfing, logging stdout straight to a file, etc).
+        args = ''
+        if not task.no_log and C.DISPLAY_ARGS_TO_STDOUT:
+            args = u', '.join(u'%s=%s' % a for a in task.args.items())
+            args = u' %s' % args
+
+        prefix = self._task_type_cache.get(task._uuid, 'TASK')
+
+        # Use cached task name
+        task_name = self._last_task_name
+        if task_name is None:
+            task_name = task.get_name().strip()
+
+        checkmsg = ""
+        self._display.banner(u"%s [%s%s]%s" % (prefix, task_name, args, checkmsg))
+        if self._display.verbosity >= 2:
+            path = task.get_path()
+            if path:
+                self._display.display(u"task path: %s" % path, color=C.COLOR_DEBUG)
+
+        self._last_task_banner = task._uuid
 
     def process_data(self, status, hostname,other=None, doc_type="ansible-runs"):
          results = {}
@@ -128,6 +173,8 @@ class CallbackModule(CallbackBase):
          results['status'] = status
          results['timestamp'] =  self._getTime()
          results['_type'] = doc_type
+         results['diff'] = self.diff
+         results['check_mode'] = self.checkmsg
          if self.args is not None:
             results.update(self.args)
          self.run_output.append(results)
@@ -146,7 +193,7 @@ class CallbackModule(CallbackBase):
             self._process_items(result)
 
         self.process_data(status, result._host.get_name())
-    
+        
     def v2_runner_on_failed(self, result, ignore_errors=False):
         results = {}
         results['exception'] = result._host.get_name()
@@ -160,13 +207,13 @@ class CallbackModule(CallbackBase):
     def v2_runner_on_unreachable(self, result):
         self.process_data("Unreachable", result._host.get_name())
 
-
     def v2_playbook_on_task_start(self, task, is_conditional):
         self.taskname = task.get_name().strip()
 
     def v2_playbook_on_play_start(self, play):
         self.playname = play.get_name().strip()
-
+        if play.check_mode:
+            self.checkmsg = "CHECK_MODE"
 
     def v2_runner_on_skipped(self, result):
         if C.DISPLAY_SKIPPED_HOSTS:
@@ -176,19 +223,7 @@ class CallbackModule(CallbackBase):
                 self.process_data("Skipped", result._host.get_name())
 
     def v2_playbook_on_stats(self, stats):
-        hosts = sorted(stats.processed.keys())
-        for h in hosts:
-            t = stats.summarize(h)
-            results = {}
-            results['hostname'] = h
-            results['ok'] = t['ok']
-            results['changed'] = t['changed']
-            results['failed'] = t['failures']
-            results['unreachable'] = t['unreachable']
-            results['_type'] = "ansible-stats"
-            if self.args is not None:
-                results.update(self.args)
-            self.run_output.append(results)
         self._insert()
 
-
+    def v2_on_file_diff(self, result):
+        self.diff = re.sub(r'(\[.*?;.*?m|\[0m)', '', self._get_diff(result._result['diff']))
