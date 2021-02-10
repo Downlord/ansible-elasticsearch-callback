@@ -17,6 +17,17 @@ callback_whitelist = elasticsearch
 
 ```
 
+You can customize the Settings by using the following environment variables:
+
+```
+ELASTICSEARCH_SERVER   (optional): defaults to localhost
+ELASTICSEARCH_PORT     (optional): defaults to 9200
+ELASTICSEARCH_TIMEOUT  (optional): defaults to 3 (seconds)
+ELASTICSEARCH_INDEX    (optional): defaults to 3 ansible_logs
+ELASTICSEARCH_DOC_ARGS (optional): Addtional json key-value pair(e.g. {"bar":"abc", "foo":"def"}) to be stored in each document
+
+```
+
 For more information about ansible configuration please refer to:
 
 [http://docs.ansible.com/ansible/intro_configuration.html#bin-ansible-callbacks](http://docs.ansible.com/ansible/intro_configuration.html#bin-ansible-callbacks)
